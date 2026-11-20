@@ -1,8 +1,8 @@
 # paperless-mcp-oidc
 
 A drop-in replacement for [barryw/PaperlessMCP](https://github.com/barryw/PaperlessMCP)
-(v0.6.0) with **one** difference: every call acts as the calling person
-(Keycloak/OIDC identity passthrough) instead of a shared Paperless API token.
+(v0.6.0) with per-user Paperless authentication through Keycloak or direct
+Paperless sign-in. A shared API token is also available for single-user setups.
 
 Same 44 tools (plus the extension `paperless_documents_thumbnail_image`, see
 [Extensions](#extensions)), same names, same parameter names/defaults, same result shapes —
@@ -72,6 +72,42 @@ Paperless is asked for any data.
   before their first call. Until they do, calls fail with a clear
   "connect Keycloak" error rather than silently falling back to anything.
 
+### `AUTH_MODE=direct`
+
+The MCP server is its own OAuth authorization server using FastMCP's
+`OAuthProvider`. It supports discovery, dynamic client registration,
+authorization code with S256 PKCE, refresh, and revocation.
+
+```dotenv
+AUTH_MODE=direct
+MCP_BASE_URL=https://paperless-mcp.example.com
+PAPERLESS_BASE_URL=https://paperless.example.com
+# DIRECT_AUTH_DB_PATH=./paperless-mcp-auth.sqlite3
+```
+
+Connect your OAuth-capable MCP client to `https://paperless-mcp.example.com/mcp`.
+Its browser sign-in flow opens a page with username and password (and an MFA
+code if Paperless requests one) or a Paperless API key from **My profile**.
+The server exchanges credentials through Paperless's `POST /api/token/` and
+uses `GET /api/ui_settings/` to verify the resulting or supplied key and
+identify its owner. Every tool call uses that owner's Paperless permissions.
+
+Use HTTPS between the browser and MCP server and between MCP and Paperless.
+For local browser testing, `MCP_BASE_URL=http://localhost:8000` is supported.
+Expose the OAuth routes at the same public base URL as the MCP endpoint.
+
+SQLite keeps client registrations and token mappings across restarts. OAuth
+access tokens expire after one hour. Refresh tokens rotate on use with a
+30-day session lifetime. Refresh checks that the Paperless key still belongs
+to the same account. Regenerating the API key in Paperless also prevents
+existing MCP grants from executing Paperless operations with the old key.
+
+The database contains usable Paperless API keys and must be kept private,
+including its backups. Use a separate database for each Paperless instance.
+The server creates the file with mode `0600`.
+For Docker, mount a persistent volume at `/home/mcp/auth`. Ensure a bind
+mount is writable by UID `10001`.
+
 ### `AUTH_MODE=token`
 
 Behaves like upstream barryw/PaperlessMCP: one shared `PAPERLESS_API_TOKEN`,
@@ -83,14 +119,15 @@ server (no IdP available). It does not require any `OIDC_*` setting.
 
 | Variable | Mode | Default | Description |
 |---|---|---|---|
-| `PAPERLESS_BASE_URL` | both | — (required) | Paperless-ngx instance URL |
-| `PAPERLESS_HOST_HEADER` | both | *(unset)* | Sent as the `Host` header on every Paperless request — needed when `PAPERLESS_BASE_URL` is an in-cluster service URL but Paperless' `ALLOWED_HOSTS` is the public name |
-| `PAPERLESS_PUBLIC_URL` | both | *(unset)* | Browser-facing Paperless URL, used only for the `url` deep link of `paperless_documents_thumbnail_image`; the link is omitted when unset |
-| `AUTH_MODE` | both | `oidc` | `oidc` or `token` |
+| `PAPERLESS_BASE_URL` | all | — (required) | Paperless-ngx instance URL |
+| `PAPERLESS_HOST_HEADER` | all | *(unset)* | Sent as the `Host` header on every Paperless request — needed when `PAPERLESS_BASE_URL` is an in-cluster service URL but Paperless' `ALLOWED_HOSTS` is the public name |
+| `PAPERLESS_PUBLIC_URL` | all | *(unset)* | Browser-facing Paperless URL, used only for the `url` deep link of `paperless_documents_thumbnail_image`; the link is omitted when unset |
+| `AUTH_MODE` | all | `oidc` | `oidc`, `direct`, or `token` |
 | `OIDC_JWKS_URI` | oidc | — (required) | Keycloak JWKS endpoint (inbound token verification) |
 | `OIDC_ISSUER` | oidc | — (required) | Keycloak realm issuer URL (inbound token verification) |
 | `OIDC_AUDIENCE` | oidc | — (required) | Expected `aud` claim on the inbound token, e.g. `paperless` |
-| `MCP_BASE_URL` | oidc | — (required) | Public address of this server (OAuth metadata discovery) |
+| `MCP_BASE_URL` | oidc, direct | — (required) | Public address of this server for OAuth discovery |
+| `DIRECT_AUTH_DB_PATH` | direct | `./paperless-mcp-auth.sqlite3` | SQLite database path. The Docker image defaults to `/home/mcp/auth/paperless-mcp-auth.sqlite3`. |
 | `OIDC_USERNAME_CLAIM` | oidc | `preferred_username` | JWT claim used to label the caller for the per-person outbox dir and debug logging (not for Paperless identity — that comes from the exchange) |
 | `OIDC_TOKEN_ENDPOINT` | oidc | — (required) | Keycloak token endpoint, used for the access_token → id_token exchange |
 | `EXCHANGE_CLIENT_ID` | oidc | — (required) | The Paperless OIDC client in Keycloak (confidential, Standard token exchange enabled) |
@@ -98,10 +135,10 @@ server (no IdP available). It does not require any `OIDC_*` setting.
 | `PAPERLESS_OIDC_PROVIDER_ID` | oidc | `keycloak` | Paperless allauth provider id for the Keycloak connection |
 | `PAPERLESS_TOKEN_CACHE_SECONDS` | oidc | `3600` | How long an exchanged Paperless DRF token is cached in memory, per person |
 | `PAPERLESS_API_TOKEN` | token | — (required in token mode) | Shared Paperless API token |
-| `HTTP_TIMEOUT_SECONDS` | both | `15` | Timeout for calls to Paperless and to Keycloak |
-| `MAX_PAGE_SIZE` | both | `100` | Upper bound clamp for any `pageSize` a caller requests |
-| `PAPERLESS_OUTBOX_DIR` | both | `/home/mcp/outbox` | Directory `paperless_documents_export_to_outbox` writes into |
-| `MCP_HOST` / `MCP_PORT` | both | `0.0.0.0` / `8000` | Bind address for the streamable-HTTP transport |
+| `HTTP_TIMEOUT_SECONDS` | all | `15` | Timeout for calls to Paperless and to Keycloak |
+| `MAX_PAGE_SIZE` | all | `100` | Upper bound clamp for any `pageSize` a caller requests |
+| `PAPERLESS_OUTBOX_DIR` | all | `/home/mcp/outbox` | Directory `paperless_documents_export_to_outbox` writes into |
+| `MCP_HOST` / `MCP_PORT` | all | `0.0.0.0` / `8000` | Bind address for the streamable-HTTP transport |
 
 Copy `.env.example` to `.env` and fill in the required values for your mode.
 
@@ -120,22 +157,16 @@ docker run --rm -p 8000:8000 --env-file .env paperless-mcp-oidc
 
 ## Security
 
-**No remote-user header, ever.** Every Paperless call carries
-`Authorization: Token <drf-token>` — the person's own token, obtained through
-the Keycloak → Paperless exchange (see Auth modes above), never a header
-Paperless would have to blindly trust. Unlike the remote-user approach, this
-server does **not** depend on Paperless-ngx being unreachable from anything
-else — there is no `NetworkPolicy` this server's correctness relies on, since
-nothing downstream of it can forge another person's identity by setting a
-header. Paperless-ngx's own permission model still decides what an
-authenticated user can see, same as if they had logged in directly.
+Every Paperless tool request carries `Authorization: Token <drf-token>`.
+In `oidc` and `direct` modes, the token belongs to the caller and Paperless
+applies that account's permissions.
 
-**DRF tokens live in memory only.** The per-person cache (see
+**OIDC mode caches DRF tokens in memory.** The per-person cache (see
 `identity.TokenExchanger`) is process memory, never written to disk or a
 external store, and never logged. Restarting the server drops it; the next
 call for each person simply re-exchanges.
 
-**File tools are confined per person in `oidc` mode.** `paperless_documents_export_to_outbox`
+**File tools are confined per person in `oidc` and `direct` modes.** `paperless_documents_export_to_outbox`
 writes into `PAPERLESS_OUTBOX_DIR/<user>-<hash>/`, and `paperless_documents_upload_from_path`
 only reads files inside the caller's own outbox (resolved path, so `..` and symlinks cannot
 escape; the check runs before the existence check, so it never reveals which other files

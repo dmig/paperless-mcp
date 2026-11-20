@@ -95,6 +95,23 @@ def test_token_mode_with_token_starts():
     assert s.auth_mode == "token"
 
 
+def test_direct_mode_requires_public_base_but_no_oidc_settings(monkeypatch):
+    for var in OIDC_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+    with pytest.raises(ValueError, match="MCP_BASE_URL"):
+        Settings(auth_mode="direct", paperless_base_url="https://p.example.com")
+    with pytest.raises(ValueError, match="HTTPS"):
+        Settings(
+            auth_mode="direct", paperless_base_url="https://p.example.com",
+            mcp_base_url="http://mcp.example.com",
+        )
+    settings = Settings(
+        auth_mode="direct", paperless_base_url="https://p.example.com",
+        mcp_base_url="http://localhost:8000/",
+    )
+    assert settings.mcp_base_url == "http://localhost:8000"
+
+
 def test_unknown_auth_mode_is_rejected():
     with pytest.raises(ValueError, match="AUTH_MODE must be"):
         Settings(paperless_base_url="https://p.example.com", auth_mode="bogus")

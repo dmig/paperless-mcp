@@ -9,6 +9,7 @@ from starlette.responses import PlainTextResponse
 
 from .client import PaperlessClient
 from .config import settings
+from .direct_auth import DirectAuthProvider
 from .identity import KeycloakExchangeError, PaperlessLinkError, TokenExchanger
 
 
@@ -17,10 +18,9 @@ class NotAuthenticated(RuntimeError):
 
 
 def _build_auth():
-    """OIDC verification only in AUTH_MODE=oidc; token mode is unprotected
-    here (single-user, documented in README) — something else (gateway,
-    reverse proxy) must sit in front of it if that matters."""
-    if settings.auth_mode != "oidc":
+    if settings.auth_mode == "direct":
+        return DirectAuthProvider(settings)
+    if settings.auth_mode == "token":
         return None
 
     from fastmcp.server.auth import RemoteAuthProvider
@@ -40,13 +40,15 @@ def _build_auth():
     )
 
 
+_auth = _build_auth()
+
 mcp = FastMCP(
     name="Paperless MCP",
     instructions=(
         "Drop-in replacement for barryw/PaperlessMCP. Every call acts as the "
         "calling person's own Paperless-ngx identity — never as a shared account."
     ),
-    auth=_build_auth(),
+    auth=_auth,
 )
 
 
@@ -84,6 +86,8 @@ async def get_client() -> PaperlessClient:
 
     AUTH_MODE=token: always the shared PAPERLESS_API_TOKEN.
 
+    AUTH_MODE=direct: the Paperless token bound to the verified OAuth grant.
+
     AUTH_MODE=oidc: the calling person's verified Keycloak access token
     (never the token itself, only a Paperless DRF token derived from it via
     identity.TokenExchanger) — see identity.py for the two-step exchange.
@@ -110,6 +114,20 @@ async def get_client() -> PaperlessClient:
     if not sub:
         raise NotAuthenticated(
             "The token is missing a 'sub' claim; without it you cannot be identified."
+        )
+
+    if isinstance(_auth, DirectAuthProvider):
+        drf_token = await _auth.paperless_token(token)
+        if not drf_token:
+            raise NotAuthenticated("Your Paperless authorization has expired. Please sign in again.")
+        return PaperlessClient(
+            base_url=settings.paperless_base_url,
+            token=drf_token,
+            host_header=settings.paperless_host_header,
+            timeout=settings.http_timeout_seconds,
+            outbox_dir=str(Path(settings.paperless_outbox_dir) / outbox_segment(sub)),
+            max_page_size=settings.max_page_size,
+            confine_paths_to_outbox=True,
         )
 
     username = token.claims.get(settings.oidc_username_claim) or sub

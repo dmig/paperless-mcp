@@ -1,14 +1,14 @@
 import sys
 import warnings
 
-from pydantic import model_validator
+from pydantic import AnyHttpUrl, TypeAdapter, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
     """Configuration for the Paperless MCP server.
 
-    AUTH_MODE picks one of two, explicit, non-overlapping identity models:
+    AUTH_MODE selects the identity model:
 
     - "oidc" (default): every call acts as the calling person. Their verified
       Keycloak access token is exchanged, via Keycloak Standard Token
@@ -19,6 +19,7 @@ class Settings(BaseSettings):
       incomplete config must refuse to start rather than quietly degrade to
       "everyone shares one identity" — that is exactly the leak this server
       exists to close.
+    - "direct": users sign in against Paperless and act with their own API token.
     - "token": behaves like the upstream barryw/PaperlessMCP — one shared
       PAPERLESS_API_TOKEN for everyone. Documented as single-user (README).
     """
@@ -39,6 +40,9 @@ class Settings(BaseSettings):
 
     # --- token mode ------------------------------------------------------
     paperless_api_token: str = ""
+
+    # --- direct mode -----------------------------------------------------
+    direct_auth_db_path: str = "./paperless-mcp-auth.sqlite3"
 
     # --- oidc mode: inbound token verification (all required in that mode) --
     oidc_jwks_uri: str = ""
@@ -76,8 +80,8 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def _validate_mode(self) -> "Settings":
-        if self.auth_mode not in ("oidc", "token"):
-            raise ValueError(f"AUTH_MODE must be 'oidc' or 'token', got {self.auth_mode!r}")
+        if self.auth_mode not in ("oidc", "direct", "token"):
+            raise ValueError(f"AUTH_MODE must be 'oidc', 'direct' or 'token', got {self.auth_mode!r}")
 
         if self.auth_mode == "oidc":
             missing = [
@@ -105,9 +109,21 @@ class Settings(BaseSettings):
                     "in this mode; every call uses the caller's own verified identity.",
                     stacklevel=2,
                 )
-        else:  # token
-            if not self.paperless_api_token:
-                raise ValueError("AUTH_MODE=token requires PAPERLESS_API_TOKEN")
+        elif self.auth_mode == "direct":
+            if not self.mcp_base_url:
+                raise ValueError("AUTH_MODE=direct requires MCP_BASE_URL")
+            url = TypeAdapter(AnyHttpUrl).validate_python(self.mcp_base_url)
+            if (
+                url.username is not None or url.password is not None
+                or url.query is not None or url.fragment is not None
+                or (url.scheme != "https" and url.host not in {"localhost", "127.0.0.1", "[::1]"})
+            ):
+                raise ValueError("MCP_BASE_URL must be an HTTPS or loopback HTTP base URL")
+            self.mcp_base_url = str(url).rstrip("/")
+            if not self.direct_auth_db_path.strip() or self.direct_auth_db_path == ":memory:":
+                raise ValueError("AUTH_MODE=direct requires a filesystem DIRECT_AUTH_DB_PATH")
+        elif not self.paperless_api_token:
+            raise ValueError("AUTH_MODE=token requires PAPERLESS_API_TOKEN")
 
         return self
 

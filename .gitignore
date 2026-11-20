@@ -10,3 +10,4 @@ dist/
 build/
 .env
 uv.lock
+/paperless-mcp-auth.sqlite3*
